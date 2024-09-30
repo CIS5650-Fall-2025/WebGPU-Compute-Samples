@@ -1,0 +1,12 @@
+{
+  "name": "WebGPU-Compute-Samples",
+  "version": "0.1.0",
+  "description": "Simple compute algorithms using WebGPU",
+  "main": "server.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "node server.js"
+  },
+  "author": "Shehzan Mohammed",
+  "license": "Apache-2.0"
+}
