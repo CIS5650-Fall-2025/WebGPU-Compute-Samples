@@ -5,8 +5,11 @@ background.
 
 ## Samples
 
-* SAXPY
-* Matrix Multiplication (Naive and Tiled using Shared Memory)
+Click to run the deployed version.
+
+* [SAXPY](https://cis5650-fall-2024.github.io/WebGPU-Compute-Samples/WebGPUSAXPY.html)
+* [Matrix Multiplication (Naive and Tiled using Shared Memory)](https://cis5650-fall-2024.github.io/WebGPU-Compute-Samples/WebGPUMatrixMultiplication.html)
+
 
 ## Run locally
 
