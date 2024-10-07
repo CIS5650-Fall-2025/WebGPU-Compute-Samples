@@ -13,6 +13,8 @@ export const WebGPUHelpers = {
             throw new Error("No appropriate GPUAdapter found.");
         }
 
+        const adapterInfo = adapter.info;
+
         let device;
         if (enablePerformanceTimers) {
             // Device initialization with performance timers
@@ -31,6 +33,6 @@ export const WebGPUHelpers = {
             throw new Error("Need a browser that supports WebGPU.");
         }
 
-        return device;
+        return { adapterInfo, device };
     }
 }

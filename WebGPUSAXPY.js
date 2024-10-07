@@ -312,7 +312,9 @@ async function saxpy() {
     const verbose = false;
     const progressElement = document.getElementById('progress');
 
-    const device = await WebGPUHelpers.initGPUDevice(true);
+    const { adapterInfo, device } = await WebGPUHelpers.initGPUDevice(true);
+
+    document.getElementById('gpu-info').innerText = `GPU: ${adapterInfo.description}`;
 
     const results = {
         size: [],
