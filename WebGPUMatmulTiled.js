@@ -1,41 +1,6 @@
-const WORKGROUP_SIZE = 16;
-const TEN_POWER_THREE = Math.pow(10, 3);
-const TEN_POWER_SIX = Math.pow(10, 6);
-const TEN_POWER_NINE = Math.pow(10, 9);
-
-function equalsEpsilon(left, right, epsilon) {
-    epsilon = (epsilon !== undefined) ? epsilon : 0.0;
-    return Math.abs(left - right) <= epsilon;
-};
-
-async function initGPUDevice()
-{
-    if (!navigator.gpu) {
-        throw new Error("WebGPU not supported on this browser.");
-    }
-
-    const adapter = await navigator.gpu.requestAdapter();
-    if (!adapter) {
-        throw new Error("No appropriate GPUAdapter found.");
-    }
-
-    // Device initialization with performance timers
-    const canTimestamp = adapter.features.has('timestamp-query');
-    if (!canTimestamp) {
-        throw new Error("Timestamps not available. Enable the right flags in your browser.");
-    }
-
-    const device = await adapter.requestDevice({
-        requiredFeatures: ["timestamp-query"]
-    });
-
-    if (!device) {
-        throw new Error("Need a browser that supports WebGPU.");
-    }
-
-    console.log(device);
-    return device;
-}
+import { MathHelpers } from './MathHelpers.js'
+import { MatrixHelpers } from './MatrixHelpers.js'
+import { WebGPUHelpers } from './WebGPUHelpers.js'
 
 let queryIndex = 0;
 function addWebGPUTimestamp(encoder, querySet) {
@@ -43,7 +8,7 @@ function addWebGPUTimestamp(encoder, querySet) {
     queryIndex++;
 }
 
-async function webGPUMatrixMultiplication(device, matmulObject) {
+async function webGPUMatrixMultiplicationTiled(device, matmulObject) {
     const matrixM = matmulObject.matrixM;
     const matrixN = matmulObject.matrixN;
     const matrixP = matmulObject.matrixP;
@@ -51,6 +16,8 @@ async function webGPUMatrixMultiplication(device, matmulObject) {
     const sizeMX = matmulObject.sizeMX;
     const sizeXY = matmulObject.sizeXY;
     const sizeNY = matmulObject.sizeNY;
+
+    const WORKGROUP_SIZE = WebGPUHelpers.WORKGROUP_SIZE;
 
     /**
      * Set up X Matrix on CPU and GPU
@@ -112,6 +79,10 @@ async function webGPUMatrixMultiplication(device, matmulObject) {
                     sizeNY: u32,
                     extra: u32
                 };
+
+                var<workgroup> sM: array<f32, ${WORKGROUP_SIZE} * ${WORKGROUP_SIZE}>;
+                var<workgroup> sN: array<f32, ${WORKGROUP_SIZE} * ${WORKGROUP_SIZE}>;
+
                 @group(0) @binding(0) var<uniform> sizes: sizesStruct;
 
                 @group(0) @binding(1) var<storage> matrixM: array<f32>;
@@ -119,25 +90,47 @@ async function webGPUMatrixMultiplication(device, matmulObject) {
                 @group(0) @binding(3) var<storage, read_write> matrixP: array<f32>;
 
                 @compute @workgroup_size(${WORKGROUP_SIZE}, ${WORKGROUP_SIZE})
-                fn computeMain(@builtin(global_invocation_id) index: vec3u) {
-                    let px = index.x;
-                    let py = index.y;
+                fn computeMain(
+                        @builtin(global_invocation_id) globalIdx: vec3u, // blockIdx * blockdim + threadIdx
+                        @builtin(workgroup_id) blockIdx: vec3u,
+                        @builtin(local_invocation_id) threadIdx: vec3u) {
 
                     let sizeMX = sizes.sizeMX;
                     let sizeXY = sizes.sizeXY;
                     let sizeNY = sizes.sizeNY;
 
-                    if (px >= sizeMX || py >= sizeNY) {
-                        return;
-                    }
+                    // Cannot do this with workgroupBarrier() - "error: 'workgroupBarrier' must only be called from uniform control flow"
+                    //if (globalIdx.x >= sizeMX || globalIdx.y >= sizeNY) { return; }
 
                     var result = 0.0;
-                    for (var k = u32(0); k < sizeXY; k++) {
-                        let m = matrixM[py * sizeMX + k];
-                        let n = matrixN[k * sizeXY + px];
-                        result += m * n;
+                    var tileFactor = u32(ceil(f32(sizeXY) / ${WORKGROUP_SIZE}));
+                    for (var t = u32(0); t < tileFactor; t++) {
+                        var tileOffset = t * ${WORKGROUP_SIZE};
+                        if (globalIdx.x < sizeMX && (tileOffset + threadIdx.y) < sizeXY) {
+                            sM[threadIdx.y * ${WORKGROUP_SIZE} + threadIdx.x] = matrixM[globalIdx.x + sizeMX * (tileOffset + threadIdx.y)];
+                        }  else {
+                            sM[threadIdx.y * ${WORKGROUP_SIZE} + threadIdx.x] = 0.0;
+                        }
+
+                        if ((tileOffset + threadIdx.x) < sizeXY && globalIdx.y < sizeNY) {
+                            sN[threadIdx.y * ${WORKGROUP_SIZE} + threadIdx.x] = matrixN[(tileOffset + threadIdx.x) + (globalIdx.y * sizeXY)];
+                        } else {
+                            sN[threadIdx.y * ${WORKGROUP_SIZE} + threadIdx.x] = 0.0;
+                        }
+
+                        workgroupBarrier(); // syncthreads()
+
+                        var elementCount = min(${WORKGROUP_SIZE}, sizeXY - tileOffset);
+                        for (var k = u32(0); k < elementCount; k++) {
+                            result += sN[threadIdx.y * ${WORKGROUP_SIZE} + k] * sM[k * ${WORKGROUP_SIZE} + threadIdx.x];
+                        }
+
+                        workgroupBarrier(); // syncthreads()
                     }
-                    matrixP[py * sizeMX + px] = result;
+
+                    if ((globalIdx.x < sizeMX) && (globalIdx.y < sizeNY)) {
+                        matrixP[globalIdx.y * sizeMX + globalIdx.x] = result;
+                    }
                 }
             `
     });
@@ -280,8 +273,7 @@ async function webGPUMatrixMultiplication(device, matmulObject) {
     if (performanceResultBuffer.mapState === 'unmapped') {
         performanceResultBuffer.mapAsync(GPUMapMode.READ).then(() => {
             const times = new BigInt64Array(performanceResultBuffer.getMappedRange());
-            gpu.elapsedTime = Number(times[1] - times[0]) / TEN_POWER_NINE; // seconds
-            gpu.gflops = (matmulObject.ops / TEN_POWER_NINE) / gpu.elapsedTime;
+            gpu.elapsedTime = Number(times[1] - times[0]) / MathHelpers.TEN_POWER_NINE; // seconds
             performanceResultBuffer.unmap();
         });
     }
@@ -320,8 +312,8 @@ async function webGPUMatrixMultiplication(device, matmulObject) {
     for (let y = 0; y < sizeNY; y++) {
         for (let x = 0; x < sizeMX; x++) {
             const index = y * sizeMX + x;
-            if (!equalsEpsilon(matrixPGPUResult[index], matrixP[index], epsilon)) {
-                console.log(`Mismatch Error: GPU = ${matrixPGPUResult[index]} and CPU = ${matrixP[index]} at index ${index} with Episilon = ${episilon}.`);
+            if (!MathHelpers.equalsEpsilon(matrixPGPUResult[index], matrixP[index], epsilon)) {
+                console.log(`Mismatch Error: GPU = ${matrixPGPUResult[index]} and CPU = ${matrixP[index]} at index ${index} with Epsilon = ${epsilon}.`);
                 error = true;
                 break;
             }
@@ -339,100 +331,89 @@ async function webGPUMatrixMultiplication(device, matmulObject) {
     return !error;
 }
 
-function cpuMatrixMultiplication(matmulObject) {
-    const matrixM = matmulObject.matrixM;
-    const matrixN = matmulObject.matrixN;
-    const matrixP = matmulObject.matrixP;
+async function run(results, device, matmulObject, verbose) {
+    MatrixHelpers.initMatrixMultiplication(matmulObject);
 
-    const sizeMX = matmulObject.sizeMX;
-    const sizeXY = matmulObject.sizeXY;
-    const sizeNY = matmulObject.sizeNY;
-
-    const startTime = performance.now();
-    for (let y = 0; y < sizeNY; y++) {
-        for (let x = 0; x < sizeMX; x++) {
-            let sum = 0;
-            for (let k = 0; k < sizeXY; k++) {
-                const a = matrixM[y * sizeMX + k];
-                const b = matrixN[k * sizeXY + x];
-                sum += a * b;
-            }
-            matrixP[y * sizeMX + x] = sum;
-        }
+    if (verbose) {
+        console.log('===========================================================;');
+        console.log(`[${matmulObject.sizeMX}, ${matmulObject.sizeXY}] x [${matmulObject.sizeXY}, ${matmulObject.sizeNY}]`);
     }
-    const endTime = performance.now();
 
-    const cpu = matmulObject.cpu;
-    cpu.elapsedTime = (endTime - startTime) / TEN_POWER_THREE; // seconds
-    cpu.gflops = (matmulObject.ops / TEN_POWER_NINE) / cpu.elapsedTime;
-}
+    results.size.mx.push(matmulObject.sizeMX);
+    results.size.xy.push(matmulObject.sizeXY);
+    results.size.ny.push(matmulObject.sizeNY);
 
-// identity matrix
-function createIdentityMatrix(sizeX, sizeY) {
-    const m = new Float32Array(sizeX * sizeY);
-    m.fill(0);
-    return m;
-}
-
-// random matrix
-function createRandomMatrix(sizeX, sizeY) {
-    const nElements = sizeX * sizeY;
-    const m = new Float32Array(nElements);
-    for (var i = 0; i < nElements; i++) {
-        m[i] = Math.random();
-    }
-    return m;
-}
-
-function initMatrixMultiplication(matmulObject) {
-    // Create X and Y Matrix on CPU
-    matmulObject.ops = matmulObject.sizeMX * matmulObject.sizeNY * matmulObject.sizeXY * 2;
-    matmulObject.matrixM = createRandomMatrix(matmulObject.sizeMX, matmulObject.sizeXY);
-    matmulObject.matrixN = createRandomMatrix(matmulObject.sizeXY, matmulObject.sizeNY);
-    matmulObject.matrixP = createIdentityMatrix(matmulObject.sizeMX, matmulObject.sizeNY);
-}
-
-async function matrixMultiplicationNaive() {
-    const matmulObject = {
-        sizeMX: 0,
-        sizeXY: 0,
-        sizeNY: 0,
-        ops: undefined,
-        matrixM: undefined,
-        matrixN: undefined,
-        matrixP: undefined,
-        cpu: {
-            elapsedTime: undefined,
-            gflops: undefined
-        },
-        gpu: {
-            elapsedTime: undefined,
-            gflops: undefined
-        }
-    };
-
-    const device = await initGPUDevice();
-
-    const maxSize = (1 << 12) + 1;
-    for (let size = 16; size < maxSize; size *= Math.SQRT2) { // Test NPOT Size too
-        matmulObject.sizeMX = matmulObject.sizeXY = matmulObject.sizeNY = Math.trunc(size);
-
-        initMatrixMultiplication(matmulObject);
-        console.log('===========================================================');
-        console.log(`Matrix M Size = ${matmulObject.sizeMX} x ${matmulObject.sizeXY}`);
-        console.log(`Matrix N Size = ${matmulObject.sizeXY} x ${matmulObject.sizeNY}`);
-        console.log(`Matrix P Size = ${matmulObject.sizeMX} x ${matmulObject.sizeXY}`);
-        cpuMatrixMultiplication(matmulObject);
-        const gpuSuccess = await webGPUMatrixMultiplication(device, matmulObject);
-        if (gpuSuccess) {
-            console.log(matmulObject.cpu);
-            console.log(matmulObject.gpu);
-            const timeSpeedUp = matmulObject.cpu.elapsedTime / matmulObject.gpu.elapsedTime;
+    MatrixHelpers.cpuMatrixMultiplication(matmulObject);
+    const gpuSuccess = await webGPUMatrixMultiplicationTiled(device, matmulObject);
+    if (gpuSuccess) {
+        const timeSpeedUp = matmulObject.cpu.elapsedTime / matmulObject.gpu.elapsedTime;
+        if (verbose) {
             console.log(`Speed Up: ${timeSpeedUp.toFixed(3)}x`);
         }
+    }
+
+    if (verbose) {
         console.log('===========================================================');
     }
-    console.log('***Matrix Multiplication Complete***');
+
+    results.status = gpuSuccess;
+    results.cpuTime = matmulObject.cpu.elapsedTime;
+    results.gpuTime = matmulObject.gpu.elapsedTime;
 }
 
-await matrixMultiplicationNaive();
+async function matrixMultiplicationTiled(mode) {
+    const matmulObject = MatrixHelpers.getEmptyMatmulObject();
+    const maxSizeX = (1 << 11) + 1;
+    const maxSizeY = (1 << 11) + 1;
+    const maxSizeZ = (1 << 11) + 1;
+
+    const verbose = true;
+
+    const device = await WebGPUHelpers.initGPUDevice(true);
+
+    const results = {
+        mode: mode,
+        size: {
+            mx: [],
+            xy: [],
+            ny: []
+        },
+        status: [],
+        cpuTime: [],
+        gpuTime: []
+    };
+
+    if (mode === MatrixHelpers.testMode.BASIC) {
+        for (let size = 16; size < maxSizeX; size *= Math.SQRT2) { // Test NPOT Size too
+            matmulObject.sizeMX = matmulObject.sizeXY = matmulObject.sizeNY = Math.trunc(size);
+            await run(results, device, matmulObject, true);
+        }
+    } else if (mode === MatrixHelpers.testMode.ADVANCE) {
+        for (let sizeY = 16; sizeY < maxSizeY; sizeY *= Math.SQRT2) { // Test NPOT Size too
+            for (let sizeX = 16; sizeX < maxSizeX; sizeX *= Math.SQRT2) { // Test NPOT Size too
+                matmulObject.sizeMX = Math.sizeNY = Math.trunc(sizeX);
+                matmulObject.sizeXY = Math.trunc(sizeY);
+                await run(results, device, matmulObject, true);
+            }
+        }
+    } else if (mode === MatrixHelpers.testMode.FULL) {
+        for (let sizeZ = 16; sizeZ < maxSizeZ; sizeZ *= Math.SQRT2) { // Test NPOT Size too
+            for (let sizeY = 16; sizeY < maxSizeY; sizeY *= Math.SQRT2) { // Test NPOT Size too
+                for (let sizeX = 16; sizeX < maxSizeX; sizeX *= Math.SQRT2) { // Test NPOT Size too
+                    matmulObject.sizeMX = Math.trunc(sizeX);
+                    matmulObject.sizeXY = Math.trunc(sizeY);
+                    matmulObject.sizeNY = Math.trunc(sizeZ);
+                    await run(results, device, matmulObject, true);
+                }
+            }
+        }
+    } else {
+        console.error('Mode not defined or invalid');
+    }
+
+    if (verbose) {
+        console.log('***Matrix Multiplication Complete***');
+    }
+}
+
+await matrixMultiplicationTiled(MatrixHelpers.testMode.BASIC);

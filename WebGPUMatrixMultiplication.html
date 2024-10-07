@@ -1,0 +1,58 @@
+<!doctype html>
+
+<html>
+
+<head>
+    <meta charset="utf-8">
+    <title>WebGPU Matrix Multiplication Benchmark</title>
+    <style>
+        html, body {
+            overflow: hidden;
+        }
+
+        td {
+            outline: none;
+            border-right: 1px solid #eee;
+            border-bottom: 1px solid #eee;
+        }
+
+        th {
+            border-right: 1px solid #eee;
+        }
+
+        regular-table {
+            top: 8em !important;
+        }
+
+        regular-table tr td {
+            font-size: large;
+            min-width: 10em;
+        }
+
+        regular-table tr th {
+            font-size: large;
+        }
+
+        regular-table tr:nth-child(even) td {
+            background: rgba(0, 0, 0, 0.2);
+        }
+    </style>
+</head>
+
+<body>
+    <script src="https://cdn.jsdelivr.net/npm/regular-table"></script>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/regular-table/dist/css/material.css" />
+    <script type="module" src="WebGPUMatrixMultiplication.js"></script>
+    <h2>WebGPU Matrix Multiplication Benchmark</h2>
+    <label for="mode">Choose a Benchmark Mode</label>
+    <select name="mode" id="mode">
+        <option value="BASIC">Basic (Square only)</option>
+        <option value="ADVANCE">Rectangular (Transposed matrices)</option>
+        <option value="FULL">Advance (Full variation)</option>
+    </select>
+    <button type="button" id="launch">Launch</button>
+    <p id="progress"></p>
+    <regular-table id="regularTable"></regular-table>
+</body>
+
+</html>

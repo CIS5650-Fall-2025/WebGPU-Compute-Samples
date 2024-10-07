@@ -1,41 +1,9 @@
-const WORKGROUP_SIZE = 256;
-const TEN_POWER_THREE = Math.pow(10, 3);
-const TEN_POWER_SIX = Math.pow(10, 6);
-const TEN_POWER_NINE = Math.pow(10, 9);
+import { MathHelpers } from './MathHelpers.js'
+import { VectorHelpers } from './VectorHelpers.js'
+import { WebGPUHelpers } from './WebGPUHelpers.js'
 
-function equalsEpsilon(left, right, epsilon) {
-    epsilon = (epsilon !== undefined) ? epsilon : 0.0;
-    return Math.abs(left - right) <= epsilon;
-};
-
-async function initGPUDevice()
-{
-    if (!navigator.gpu) {
-        throw new Error("WebGPU not supported on this browser.");
-    }
-
-    const adapter = await navigator.gpu.requestAdapter();
-    if (!adapter) {
-        throw new Error("No appropriate GPUAdapter found.");
-    }
-
-    // Device initialization with performance timers
-    const canTimestamp = adapter.features.has('timestamp-query');
-    if (!canTimestamp) {
-        throw new Error("Timestamps not available. Enable the right flags in your browser.");
-    }
-
-    const device = await adapter.requestDevice({
-        requiredFeatures: ["timestamp-query"]
-    });
-
-    if (!device) {
-        throw new Error("Need a browser that supports WebGPU.");
-    }
-
-    console.log(device);
-    return device;
-}
+const regularTable = window.regularTable;
+const WORKGROUP_SIZE = WebGPUHelpers.WORKGROUP_SIZE_1D;
 
 let queryIndex = 0;
 function addWebGPUTimestamp(encoder, querySet) {
@@ -43,7 +11,7 @@ function addWebGPUTimestamp(encoder, querySet) {
     queryIndex++;
 }
 
-async function webGPUSAXPY(device, saxpyObject) {
+async function webGPUSAXPY(device, saxpyObject, verbose) {
     const size = saxpyObject.size;
     const aScalar = saxpyObject.aScalar;
     const xVector = saxpyObject.xVector;
@@ -262,8 +230,7 @@ async function webGPUSAXPY(device, saxpyObject) {
     if (performanceResultBuffer.mapState === 'unmapped') {
         performanceResultBuffer.mapAsync(GPUMapMode.READ).then(() => {
             const times = new BigInt64Array(performanceResultBuffer.getMappedRange());
-            gpu.elapsedTime = Number(times[1] - times[0]) / TEN_POWER_NINE; // seconds
-            gpu.gflops = (saxpyObject.ops / TEN_POWER_NINE) / gpu.elapsedTime;
+            gpu.elapsedTime = Number(times[1] - times[0]) / MathHelpers.TEN_POWER_NINE; // seconds
             performanceResultBuffer.unmap();
         });
     }
@@ -299,7 +266,7 @@ async function webGPUSAXPY(device, saxpyObject) {
      */
     let error = false;
     for (let i = 0; i < size; i++) {
-        if (!equalsEpsilon(zVectorGPUResult[i], zVector[i], 1e-6)) {
+        if (!MathHelpers.equalsEpsilon(zVectorGPUResult[i], zVector[i], 1e-6)) {
             console.log (`Mismatch Error: GPU = ${zVectorGPUResult[i]} and CPU = ${zVector[i]} at index ${i}.`);
             error = true;
             break;
@@ -308,96 +275,103 @@ async function webGPUSAXPY(device, saxpyObject) {
 
     zVectorStagingBuffer.unmap();
 
-    if (!error) {
+    if (!error && verbose) {
         console.log('Results match');
     }
 
     return !error;
 }
 
-function cpuSAXPY(saxpyObject) {
-    const size = saxpyObject.size;
-    const aScalar = saxpyObject.aScalar;
-    const xVector = saxpyObject.xVector;
-    const yVector = saxpyObject.yVector;
-    const zVector = saxpyObject.zVector;
-
-    const startTime = performance.now();
-    for (let i = 0; i < size; i++) {
-       zVector[i] =  aScalar * xVector[i] + yVector[i];
+async function run(results, device, saxpyObject, verbose) {
+    VectorHelpers.initSAXPY(saxpyObject);
+    if (verbose) {
+        console.log('===========================================================');
+        console.log(`Size = ${saxpyObject.size}`)
     }
-    const endTime = performance.now();
+    results.size.push(saxpyObject.size);
 
-    const cpu = saxpyObject.cpu;
-    cpu.elapsedTime = (endTime - startTime) / TEN_POWER_THREE; // seconds
-    cpu.gflops = (saxpyObject.ops / TEN_POWER_NINE) / cpu.elapsedTime;
-}
-
-// identity vector
-function createIdentityVector(size) {
-    const v = new Float32Array(size);
-    v.fill(0);
-    return v;
-}
-
-// random vector
-function createRandomVector(size) {
-    const v = new Float32Array(size);
-    for (var i = 0; i < size; ++i) {
-        v[i] = Math.random();
+    VectorHelpers.cpuSAXPY(saxpyObject);
+    const gpuSuccess = await webGPUSAXPY(device, saxpyObject, verbose);
+    if (gpuSuccess) {
+        const timeSpeedUp = saxpyObject.cpu.elapsedTime / saxpyObject.gpu.elapsedTime;
+        if (verbose) {
+            console.log(`Speed Up: ${timeSpeedUp.toFixed(3)}x`);
+        }
     }
-    return v;
-}
 
-function initSAXPY(saxpyObject) {
-    const size = saxpyObject.size;
+    if (verbose) {
+        console.log('===========================================================');
+    }
 
-    // Create X and Y Vector on CPU
-    saxpyObject.ops = size * 2;
-    saxpyObject.aScalar = Math.random();
-    saxpyObject.xVector = createRandomVector(size);
-    saxpyObject.yVector = createRandomVector(size);
-    saxpyObject.zVector = createIdentityVector(size);
+    results.status.push(gpuSuccess);
+    results.cpuTime.push(saxpyObject.cpu.elapsedTime);
+    results.gpuTime.push(saxpyObject.gpu.elapsedTime);
 }
 
 async function saxpy() {
-    const saxpyObject = {
-        size: 0,
-        ops: undefined,
-        aScalar: undefined,
-        xVector: undefined,
-        yVector: undefined,
-        zVector: undefined,
-        cpu: {
-            elapsedTime: undefined,
-            gflops: undefined
-        },
-        gpu: {
-            elapsedTime: undefined,
-            gflops: undefined
-        }
+    const verbose = false;
+    const progressElement = document.getElementById('progress');
+
+    const device = await WebGPUHelpers.initGPUDevice(true);
+
+    const results = {
+        size: [],
+        status: [],
+        cpuTime: [],
+        gpuTime: []
     };
 
-    const device = await initGPUDevice();
+    const saxpyObject = VectorHelpers.getEmptySaxpyObject();
 
     const maxSize = (1 << 24) + 1;
-    for (let size = 16; size < maxSize; size *= Math.SQRT2) { // Test NPOT Sizes too
+    for (let size = 1 << 16; size < maxSize; size *= Math.SQRT2) { // Test NPOT Sizes too
         saxpyObject.size = Math.trunc(size);
-
-        initSAXPY(saxpyObject);
-        console.log('===========================================================');
-        console.log(`Size = ${saxpyObject.size}`)
-        cpuSAXPY(saxpyObject);
-        const gpuSuccess = await webGPUSAXPY(device, saxpyObject);
-        if (gpuSuccess) {
-            console.log(saxpyObject.cpu);
-            console.log(saxpyObject.gpu);
-            const timeSpeedUp = saxpyObject.cpu.elapsedTime / saxpyObject.gpu.elapsedTime;
-            console.log(`Speed Up: ${timeSpeedUp.toFixed(3)}x`);
-        }
-        console.log('===========================================================');
+        progressElement.innerText = `Running WebGPU SAXPY for size ${MathHelpers.formatNumber(saxpyObject.size)}`;
+        await run(results, device, saxpyObject, verbose);
     }
-    console.log('***SAXPY Complete***');
+
+    if (verbose) {
+        console.log('***SAXPY Complete***');
+    }
+
+    progressElement.remove();
+    resultsToTable(results);
+};
+
+function resultsToTable(results) {
+    const speedUps = results.cpuTime.map((value, index) => value / results.gpuTime[index]);
+
+    const tableData = [
+        results.size.map(MathHelpers.formatNumber),
+        results.status,
+        results.cpuTime.map((value) => value.toFixed(6)),
+        results.gpuTime.map((value) => value.toFixed(6)),
+        speedUps.map((value, index) => (results.status[index] === true) ? (value.toFixed(3) + 'x') : '')
+    ];
+
+    const columnHeaders = [['Vector Size'], ['GPU Success'], ['CPU Time (sec)'], ['GPU Time (sec)'], ['Speed Up WebGPU vs CPU)']];
+
+    function dataListener(x0, y0, x1, y1) {
+        return {
+            num_rows: results.size.length,
+            num_columns: tableData.length,
+            data: tableData.slice(x0, x1).map((col) => col.slice(y0, y1)),
+            column_headers: columnHeaders
+        };
+    }
+
+    regularTable.setDataListener(dataListener);
+
+    regularTable.addStyleListener(() => {
+        for (const td of regularTable.querySelectorAll("td")) {
+            const meta = regularTable.getMeta(td);
+            if (meta.column_header[0] === columnHeaders[1][0]) {
+                td.style.color = meta.value ? 'green' : 'red';
+            }
+        }
+    });
+
+    regularTable.draw();
 }
 
 await saxpy();
