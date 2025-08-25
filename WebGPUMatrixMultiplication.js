@@ -4,11 +4,8 @@ import { WebGPUHelpers } from './WebGPUHelpers.js'
 
 const WORKGROUP_SIZE = WebGPUHelpers.WORKGROUP_SIZE_2D;
 
+// Query index counter for timestamps
 let queryIndex = 0;
-function addWebGPUTimestamp(encoder, querySet) {
-    encoder.writeTimestamp(querySet, queryIndex);
-    queryIndex++;
-}
 
 const matmulComputeShaderObjects = {};
 matmulComputeShaderObjects[MatrixHelpers.kernel.naive] = {
@@ -265,11 +262,16 @@ async function webGPUMatrixMultiplication(device, matmulObject, kernel, verbose)
      * Performance timers
      */
     queryIndex = 0;
-    const { querySet, performanceResolveBuffer, performanceResultBuffer } = (() => {
+    const { querySet, timestampWrites, performanceResolveBuffer, performanceResultBuffer } = (() => {
         const querySet = device.createQuerySet({
             type: 'timestamp',
             count: 2,
         });
+        const timestampWrites = {
+            querySet: querySet,
+            beginningOfPassWriteIndex: queryIndex,
+            endOfPassWriteIndex: queryIndex + 1
+        };
         const performanceResolveBuffer = device.createBuffer({
             size: querySet.count * 8,
             usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC,
@@ -278,8 +280,7 @@ async function webGPUMatrixMultiplication(device, matmulObject, kernel, verbose)
             size: performanceResolveBuffer.size,
             usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
         });
-
-        return { querySet, performanceResolveBuffer, performanceResultBuffer };
+        return { querySet, timestampWrites, performanceResolveBuffer, performanceResultBuffer };
     })();
 
     /**
@@ -287,13 +288,15 @@ async function webGPUMatrixMultiplication(device, matmulObject, kernel, verbose)
      * which defines the pipelines, buffers, layouts that are the inputs and outputs.
      * It's important to know that simply making these calls does not cause the GPU to actually do anything. They're just recording commands for the GPU to do later.
      */
-    addWebGPUTimestamp(encoder, querySet); // start time
-    const computePass = encoder.beginComputePass();
+    const computePass = encoder.beginComputePass({ timestampWrites });
     computePass.setPipeline(matmulCSPipeline);
     computePass.setBindGroup(0, matmulCSBindGroup);
     computePass.dispatchWorkgroups(Math.ceil(sizeMX / WORKGROUP_SIZE), Math.ceil(sizeNY / WORKGROUP_SIZE));
     computePass.end();
-    addWebGPUTimestamp(encoder, querySet); // end time
+
+    // Incremement the Query Index counter
+    queryIndex += 2;
+
 
     // Connect the performance timers.
     encoder.resolveQuerySet(querySet, 0, querySet.count, performanceResolveBuffer, 0);
