@@ -143,7 +143,7 @@ async function webGPUMatrixMultiplication(device, matmulObject, kernel, verbose)
     // Create buffer on GPU for Y
     // Alternate method of copying data to GPU
     const matrixNGPUBuffer = device.createBuffer({
-        label: "Y Matrix GPU Buffer",
+        label: "N Matrix GPU Buffer",
         size: matrixN.byteLength,
         usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
     });
