@@ -123,9 +123,9 @@ async function webGPUMatrixMultiplication(device, matmulObject, kernel, verbose)
 
 
     /**
-     * Set up X Matrix on CPU and GPU
+     * Set up M Matrix on CPU and GPU
      */
-    // Create buffer on GPU for X
+    // Create buffer on GPU for M
     const matrixMGPUBuffer = device.createBuffer({
         label: "M Matrix GPU Buffer",
         mappedAtCreation: true,
@@ -138,9 +138,9 @@ async function webGPUMatrixMultiplication(device, matmulObject, kernel, verbose)
     matrixMGPUBuffer.unmap();
 
     /**
-     * Set up Y Matrix on CPU and GPU
+     * Set up N Matrix on CPU and GPU
      */
-    // Create buffer on GPU for Y
+    // Create buffer on GPU for N
     // Alternate method of copying data to GPU
     const matrixNGPUBuffer = device.createBuffer({
         label: "N Matrix GPU Buffer",
