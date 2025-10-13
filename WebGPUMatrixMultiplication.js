@@ -207,7 +207,7 @@ async function webGPUMatrixMultiplication(device, matmulObject, kernel, verbose)
     });
 
     /**
-     * Create a Bind Group Layout.
+     * Create a Bind Group.
      * The Bind Group connects the actual buffers to the locations.
      * This is essentially like the function parameters for calling shaders.
     */
