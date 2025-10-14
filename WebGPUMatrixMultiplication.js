@@ -4,9 +4,6 @@ import { WebGPUHelpers } from './WebGPUHelpers.js'
 
 const WORKGROUP_SIZE = WebGPUHelpers.WORKGROUP_SIZE_2D;
 
-// Query index counter for timestamps
-let queryIndex = 0;
-
 const matmulComputeShaderObjects = {};
 matmulComputeShaderObjects[MatrixHelpers.kernel.naive] = {
     label: "Matrix Multiplication Naive Compute Shader",
@@ -261,7 +258,6 @@ async function webGPUMatrixMultiplication(device, matmulObject, kernel, verbose)
     /**
      * Performance timers
      */
-    queryIndex = 0;
     const { querySet, timestampWrites, performanceResolveBuffer, performanceResultBuffer } = (() => {
         const querySet = device.createQuerySet({
             type: 'timestamp',
@@ -269,8 +265,8 @@ async function webGPUMatrixMultiplication(device, matmulObject, kernel, verbose)
         });
         const timestampWrites = {
             querySet: querySet,
-            beginningOfPassWriteIndex: queryIndex,
-            endOfPassWriteIndex: queryIndex + 1
+            beginningOfPassWriteIndex: 0,
+            endOfPassWriteIndex: 1
         };
         const performanceResolveBuffer = device.createBuffer({
             size: querySet.count * 8,
@@ -293,10 +289,6 @@ async function webGPUMatrixMultiplication(device, matmulObject, kernel, verbose)
     computePass.setBindGroup(0, matmulCSBindGroup);
     computePass.dispatchWorkgroups(Math.ceil(sizeMX / WORKGROUP_SIZE), Math.ceil(sizeNY / WORKGROUP_SIZE));
     computePass.end();
-
-    // Incremement the Query Index counter
-    queryIndex += 2;
-
 
     // Connect the performance timers.
     encoder.resolveQuerySet(querySet, 0, querySet.count, performanceResolveBuffer, 0);
@@ -371,9 +363,75 @@ async function webGPUMatrixMultiplication(device, matmulObject, kernel, verbose)
 
     if (!error && verbose) {
         console.log('Results match');
+    } else if (error){
+        return false;
     }
 
-    return !error;
+    /**
+     * BENCHMARK BY RUNNING 10 TIMES
+     * We'll run the code 11 times and exclude the first time from the timing.
+     */
+    const runCount = 11;
+    gpu.elapsedTime = 0.0;
+    const { benchmarkQuerySet, benchmarkTimestampWrites, benchmarkPerformanceResolveBuffer, benchmarkPerformanceResultBuffer } = (() => {
+        const benchmarkQuerySet = device.createQuerySet({
+            label: 'Benchmark Query Set',
+            type: 'timestamp',
+            count: 2,
+        });
+        const benchmarkTimestampWrites = {
+            querySet: benchmarkQuerySet,
+            beginningOfPassWriteIndex: 0,
+            endOfPassWriteIndex: 1
+        }
+        const benchmarkPerformanceResolveBuffer = device.createBuffer({
+            label: 'Benchmark Performance Resolve Buffer',
+            size: benchmarkQuerySet.count * 8,
+            usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC,
+        });
+        const benchmarkPerformanceResultBuffer = device.createBuffer({
+            label: 'Benchmark Performance Results Buffer',
+            size: benchmarkPerformanceResolveBuffer.size * runCount,
+            usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+        });
+        return { benchmarkQuerySet, benchmarkTimestampWrites, benchmarkPerformanceResolveBuffer, benchmarkPerformanceResultBuffer };
+    })();
+
+    for (let i = 0; i < runCount; i++) {
+        const benchmarkEncoder = device.createCommandEncoder();
+
+        const benchmarkComputePassDescriptor = {
+            label: `Benchmark Compute Pass - Iteration ${i}`,
+            timestampWrites: benchmarkTimestampWrites
+        };
+
+        const benchmarkComputePass = benchmarkEncoder.beginComputePass(benchmarkComputePassDescriptor);
+        benchmarkComputePass.setPipeline(matmulCSPipeline);
+        benchmarkComputePass.setBindGroup(0, matmulCSBindGroup);
+        benchmarkComputePass.dispatchWorkgroups(Math.ceil(sizeMX / WORKGROUP_SIZE), Math.ceil(sizeNY / WORKGROUP_SIZE));
+        benchmarkComputePass.end();
+
+        // Connect the performance timers.
+        benchmarkEncoder.resolveQuerySet(benchmarkQuerySet, 0, 2, benchmarkPerformanceResolveBuffer, 0);
+        if (benchmarkPerformanceResultBuffer.mapState === 'unmapped') {
+            benchmarkEncoder.copyBufferToBuffer(benchmarkPerformanceResolveBuffer, 0, benchmarkPerformanceResultBuffer, 2 * i * 8, 2 * 8);
+        }
+        device.queue.submit([benchmarkEncoder.finish()]);
+        await device.queue.onSubmittedWorkDone();
+    }
+
+    if (benchmarkPerformanceResultBuffer.mapState === 'unmapped') {
+        await benchmarkPerformanceResultBuffer.mapAsync(GPUMapMode.READ);
+        const times = new BigInt64Array(benchmarkPerformanceResultBuffer.getMappedRange());
+        for (let i = 1; i < runCount; i++) {
+            //console.log(`Run ${i} Elapsed time: ${Number(times[2 * i + 1] - times[2 * i]) / MathHelpers.TEN_POWER_NINE} seconds`);
+            gpu.elapsedTime += Number(times[2 * i + 1] - times[2 * i]) / MathHelpers.TEN_POWER_NINE; // seconds
+        }
+        gpu.elapsedTime /= (runCount - 1); // Average
+        benchmarkPerformanceResultBuffer.unmap();
+    }
+
+    return true;
 }
 
 async function run(results, device, matmulObject, verbose) {
