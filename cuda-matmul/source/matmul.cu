@@ -197,7 +197,9 @@ void run(json& results, const MatrixSizes& matrixSizes)
     std::vector<float> matrixPNaive = createIdentityMatrix(sizeMX, sizeNY);
     std::vector<float> matrixPTiled = createIdentityMatrix(sizeMX, sizeNY);
 
+    //////////////////////////////////////////////////////////////////
     // CPU Matrix Multiplication
+    //////////////////////////////////////////////////////////////////
     auto timerStart = std::chrono::high_resolution_clock::now();
     for (unsigned y = 0; y < sizeNY; y++) {
         for (unsigned x = 0; x < sizeMX; x++) {
@@ -215,7 +217,9 @@ void run(json& results, const MatrixSizes& matrixSizes)
     std::chrono::duration<float> cpuElapsedTime = timeEnd - timerStart;
     results["cpuTime"].push_back(cpuElapsedTime.count());
 
-    // Device arrays
+    //////////////////////////////////////////////////////////////////
+    // CUDA Setup
+    //////////////////////////////////////////////////////////////////
     float *d_matrixM, *d_matrixN, *d_matrixPNaive, *d_matrixPTiled;
 
     CUDA(cudaMalloc((void **)&d_matrixM, sizeMX * sizeXY * sizeof(float)));
@@ -238,7 +242,9 @@ void run(json& results, const MatrixSizes& matrixSizes)
     cudaEventCreate(&start);
     cudaEventCreate(&stop);
 
+    //////////////////////////////////////////////////////////////////
     // Naive Matrix Multiplication
+    //////////////////////////////////////////////////////////////////
     cudaEventRecord(start, 0);
 
     matrixMultiplicationNaive<<<dims.dimGrid, dims.dimBlock>>>(d_matrixPNaive, d_matrixM, d_matrixN, sizeMX, sizeNY, sizeXY);
@@ -253,10 +259,33 @@ void run(json& results, const MatrixSizes& matrixSizes)
     cudaEventElapsedTime(&naiveTime, start, stop);
 
     bool naiveSuccess = compareMatrix(matrixPNaive, matrixP, sizeMX, sizeNY, sizeXY);
+
+    if (naiveSuccess) {
+        //////////////////////////////////////////////////////////////////
+        // Benchmark Naive Matrix Multiplication
+        //////////////////////////////////////////////////////////////////
+        cudaEventRecord(start, 0);
+
+        int iterations = 10;
+        for (int i = 0; i < iterations; i++)
+            matrixMultiplicationNaive<<<dims.dimGrid, dims.dimBlock>>>(d_matrixPNaive, d_matrixM, d_matrixN, sizeMX, sizeNY, sizeXY);
+
+        cudaEventRecord(stop, 0);
+        cudaEventSynchronize(stop);
+
+        CUDA(cudaDeviceSynchronize());
+
+        cudaEventElapsedTime(&naiveTime, start, stop);
+        naiveTime /= (1000 * iterations);
+        //////////////////////////////////////////////////////////////////
+    }
+
     results["status"][kernelNaive].push_back(naiveSuccess);
     results["gpuTime"][kernelNaive].push_back(naiveTime);
 
+    //////////////////////////////////////////////////////////////////
     // Tiled Matrix Multiplication
+    //////////////////////////////////////////////////////////////////
     cudaEventRecord(start, 0);
 
     matrixMultiplicationTiled<<<dims.dimGrid, dims.dimBlock>>>(d_matrixPTiled, d_matrixM, d_matrixN, sizeMX, sizeNY, sizeXY);
@@ -271,9 +300,33 @@ void run(json& results, const MatrixSizes& matrixSizes)
     cudaEventElapsedTime(&tiledTime, start, stop);
 
     bool tiledSuccess = compareMatrix(matrixPTiled, matrixP, sizeMX, sizeNY, sizeXY);
+
+    if (tiledSuccess) {
+        //////////////////////////////////////////////////////////////////
+        // Benchmark Tiled Matrix Multiplication
+        //////////////////////////////////////////////////////////////////
+        cudaEventRecord(start, 0);
+
+        int iterations = 10;
+        for (int i = 0; i < iterations; i++)
+            matrixMultiplicationTiled<<<dims.dimGrid, dims.dimBlock>>>(d_matrixPTiled, d_matrixM, d_matrixN, sizeMX, sizeNY, sizeXY);
+
+        cudaEventRecord(stop, 0);
+        cudaEventSynchronize(stop);
+
+        CUDA(cudaDeviceSynchronize());
+
+        cudaEventElapsedTime(&tiledTime, start, stop);
+        tiledTime /= (1000 * iterations);
+        //////////////////////////////////////////////////////////////////
+    }
+
     results["status"][kernelTiled].push_back(tiledSuccess);
     results["gpuTime"][kernelTiled].push_back(tiledTime);
 
+    //////////////////////////////////////////////////////////////////
+    // Clean up
+    //////////////////////////////////////////////////////////////////
     CUDA(cudaFree(d_matrixM));
     CUDA(cudaFree(d_matrixN));
     CUDA(cudaFree(d_matrixPNaive));
